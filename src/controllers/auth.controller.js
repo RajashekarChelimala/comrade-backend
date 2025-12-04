@@ -199,6 +199,16 @@ export async function refresh(req, res) {
     const newAccessToken = signAccessToken(user._id.toString());
     const newRefreshToken = signRefreshToken(user._id.toString());
 
+    // Generate new CSRF token for the refreshed session
+    const csrfToken = `${user._id.toString()}:${Date.now()}`;
+    res.cookie('comrade_csrf', csrfToken, {
+      httpOnly: false,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'strict',
+      path: '/',
+      maxAge: 7 * 24 * 60 * 60 * 1000,
+    });
+
     res.cookie('comrade_refresh', newRefreshToken, {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
@@ -211,6 +221,7 @@ export async function refresh(req, res) {
       tokens: {
         accessToken: newAccessToken,
       },
+      csrfToken,
     });
   } catch (err) {
     return res.status(401).json({ message: 'Invalid or expired refresh token' });
