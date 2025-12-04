@@ -20,9 +20,19 @@ export function csrfProtection(req, res, next) {
 
   const headerToken = req.headers['x-csrf-token'];
   const cookieToken = req.cookies?.comrade_csrf;
+  const isCrossOrigin = process.env.NODE_ENV === 'production';
 
-  if (!headerToken || !cookieToken || headerToken !== cookieToken) {
-    return res.status(403).json({ message: 'Invalid CSRF token' });
+  if (isCrossOrigin) {
+    // In production (cross-origin), only check header token
+    // since cookies don't work across different domains
+    if (!headerToken) {
+      return res.status(403).json({ message: 'CSRF token required' });
+    }
+  } else {
+    // In development, check both header and cookie for additional security
+    if (!headerToken || !cookieToken || headerToken !== cookieToken) {
+      return res.status(403).json({ message: 'Invalid CSRF token' });
+    }
   }
 
   return next();
