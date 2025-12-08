@@ -5,6 +5,7 @@ import app from './app.js';
 import { initSocket } from './socket/index.js';
 import { connectDb } from './config/db.js';
 import { scheduleMediaCleanupJob } from './jobs/mediaCleanup.js';
+import { getTransporter } from './services/emailService.js';
 
 dotenv.config();
 
@@ -12,6 +13,16 @@ const PORT = process.env.PORT || 4000;
 
 async function start() {
   await connectDb();
+
+  // Validate email configuration
+  try {
+    console.log('Validating email configuration...');
+    getTransporter(); // This will throw if config is missing
+    console.log('Email configuration validated successfully');
+  } catch (emailError) {
+    console.warn('Email configuration validation failed:', emailError.message);
+    console.warn('Email features will not be available until SMTP is properly configured');
+  }
 
   const server = http.createServer(app);
 

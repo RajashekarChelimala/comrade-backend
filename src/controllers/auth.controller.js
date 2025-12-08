@@ -100,8 +100,14 @@ export async function register(req, res) {
 
   try {
     await sendVerificationEmail(user.email, verificationCode);
-  } catch (e) {
-    // If email sending fails, still create user but inform client
+    console.log('Verification email sent successfully to:', user.email);
+  } catch (emailError) {
+    console.error('Failed to send verification email during registration:', {
+      email: user.email,
+      error: emailError.message,
+      stack: emailError.stack
+    });
+    // User is created but email failed - we'll let them know to request a new code
   }
 
   return res.status(201).json({
@@ -299,8 +305,14 @@ export async function resendVerification(req, res) {
 
   try {
     await sendVerificationEmail(user.email, verificationCode);
-  } catch (e) {
-    // ignore email errors
+    console.log('Verification email resent successfully to:', user.email);
+  } catch (emailError) {
+    console.error('Failed to resend verification email:', {
+      email: user.email,
+      error: emailError.message,
+      stack: emailError.stack
+    });
+    // Still return success to user, but log the error
   }
 
   return res.json({ message: 'Verification code resent' });
