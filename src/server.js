@@ -5,7 +5,6 @@ import app from './app.js';
 import { initSocket } from './socket/index.js';
 import { connectDb } from './config/db.js';
 import { scheduleMediaCleanupJob } from './jobs/mediaCleanup.js';
-import { getTransporter } from './services/emailService.js';
 
 dotenv.config();
 
@@ -17,11 +16,22 @@ async function start() {
   // Validate email configuration
   try {
     console.log('Validating email configuration...');
-    getTransporter(); // This will throw if config is missing
-    console.log('Email configuration validated successfully');
+    const RESEND_API_KEY = process.env.RESEND_API_KEY;
+    if (RESEND_API_KEY) {
+      console.log('RESEND_API_KEY found - email service ready');
+    } else {
+      console.log('RESEND_API_KEY not found, checking SMTP fallback...');
+      const { SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS } = process.env;
+      if (SMTP_HOST && SMTP_PORT && SMTP_USER && SMTP_PASS) {
+        console.log('SMTP configuration found - email service ready');
+      } else {
+        console.warn('Neither RESEND_API_KEY nor SMTP configuration found');
+        console.warn('Email features will not be available');
+      }
+    }
   } catch (emailError) {
     console.warn('Email configuration validation failed:', emailError.message);
-    console.warn('Email features will not be available until SMTP is properly configured');
+    console.warn('Email features will not be available until properly configured');
   }
 
   const server = http.createServer(app);
