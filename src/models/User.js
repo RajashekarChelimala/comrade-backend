@@ -3,6 +3,7 @@ import mongoose from 'mongoose';
 const settingsSchema = new mongoose.Schema(
   {
     searchableByEmail: { type: Boolean, default: true },
+    isSearchable: { type: Boolean, default: true },
     showLastSeen: { type: Boolean, default: true },
   },
   { _id: false },
@@ -13,8 +14,16 @@ const userSchema = new mongoose.Schema(
     name: { type: String, required: true, trim: true },
     email: { type: String, required: true, unique: true, lowercase: true, trim: true },
     passwordHash: { type: String, required: true },
-    comradeHandle: { type: String, required: true, unique: true, index: true },
-    comradeId: { type: String, required: true, unique: true, index: true },
+    // comradeHandle removed in favor of comradeId
+    comradeId: {
+      type: String,
+      required: true,
+      unique: true,
+      index: true,
+      trim: true,
+      minLength: 3,
+      maxLength: 30
+    },
     role: { type: String, enum: ['user', 'admin'], default: 'user' },
     status: {
       type: String,
@@ -40,6 +49,6 @@ const userSchema = new mongoose.Schema(
   { timestamps: true },
 );
 
-userSchema.index({ name: 'text', comradeHandle: 'text' });
+userSchema.index({ name: 'text', comradeId: 'text' });
 
 export const User = mongoose.model('User', userSchema);

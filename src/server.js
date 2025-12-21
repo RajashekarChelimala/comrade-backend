@@ -1,14 +1,13 @@
+import 'dotenv/config';
 import http from 'http';
-import dotenv from 'dotenv';
 import { Server as SocketIOServer } from 'socket.io';
+import bcrypt from 'bcryptjs';
 import app from './app.js';
 import { initSocket } from './socket/index.js';
 import { connectDb } from './config/db.js';
 import { scheduleMediaCleanupJob } from './jobs/mediaCleanup.js';
 
-dotenv.config();
-
-const PORT = process.env.PORT || 4000;
+const PORT = process.env.PORT || 5000;
 
 async function start() {
   await connectDb();
@@ -16,22 +15,68 @@ async function start() {
   // Validate email configuration
   try {
     console.log('Validating email configuration...');
-    const RESEND_API_KEY = process.env.RESEND_API_KEY;
-    if (RESEND_API_KEY) {
-      console.log('RESEND_API_KEY found - email service ready');
+    const { SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS } = process.env;
+    if (SMTP_HOST && SMTP_PORT && SMTP_USER && SMTP_PASS) {
+      console.log('SMTP configuration found - email service ready');
     } else {
-      console.log('RESEND_API_KEY not found, checking SMTP fallback...');
-      const { SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS } = process.env;
-      if (SMTP_HOST && SMTP_PORT && SMTP_USER && SMTP_PASS) {
-        console.log('SMTP configuration found - email service ready');
-      } else {
-        console.warn('Neither RESEND_API_KEY nor SMTP configuration found');
-        console.warn('Email features will not be available');
-      }
+      console.warn('SMTP configuration not found');
+      console.warn('Email features will not be available');
     }
   } catch (emailError) {
     console.warn('Email configuration validation failed:', emailError.message);
     console.warn('Email features will not be available until properly configured');
+  }
+
+  // Admin Seeding
+  const adminEmail = process.env.ADMIN_EMAIL;
+  const adminPass = process.env.ADMIN_PASSWORD;
+
+  if (adminEmail && adminPass) {
+    try {
+      // Dynamic import not strictly necessary if potential circular dep is not an issue, 
+      // but keeping it as per previous pattern or just importing User at top if possible.
+      // Top level import is safer for standard models.
+      const { User } = await import('./models/User.js');
+      const adminUser = await User.findOne({ email: adminEmail });
+
+      if (!adminUser) {
+        const salt = await bcrypt.genSalt(10);
+        const passwordHash = await bcrypt.hash(adminPass, salt);
+
+        await User.create({
+          name: 'Admin',
+          email: adminEmail,
+          passwordHash,
+          role: 'admin',
+          comradeId: 'admin',
+          emailVerified: true, // Fixed field name
+          status: 'active',
+          settings: {
+            isSearchable: true,
+            searchableByEmail: true,
+            showLastSeen: true
+          }
+        });
+        console.log(`Admin user created: ${adminEmail}`);
+      } else {
+        let updated = false;
+        if (adminUser.role !== 'admin') {
+          adminUser.role = 'admin';
+          updated = true;
+        }
+        if (!adminUser.emailVerified) {
+          adminUser.emailVerified = true;
+          updated = true;
+        }
+
+        if (updated) {
+          await adminUser.save();
+          console.log(`User ${adminEmail} updated (Promoted/Verified)`);
+        }
+      }
+    } catch (err) {
+      console.error('Failed to seed admin user:', err);
+    }
   }
 
   const server = http.createServer(app);

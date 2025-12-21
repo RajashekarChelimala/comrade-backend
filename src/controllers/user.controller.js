@@ -6,7 +6,7 @@ const REPORT_THRESHOLD = 10;
 
 export async function getMe(req, res) {
   const user = await User.findById(req.user.id).select(
-    'name email comradeHandle comradeId status role settings lastSeenAt isOnline blockedUsers mutedUsers',
+    'name email comradeId status role settings lastSeenAt isOnline blockedUsers mutedUsers',
   );
   if (!user) {
     return res.status(404).json({ message: 'User not found' });
@@ -22,9 +22,11 @@ export async function updateMe(req, res) {
 
   const user = await User.findByIdAndUpdate(req.user.id, update, {
     new: true,
-  }).select('name email comradeHandle comradeId status role settings lastSeenAt isOnline');
+  }).select('name email comradeId status role settings lastSeenAt isOnline');
   return res.json({ user });
 }
+
+import { ChatRequest } from '../models/ChatRequest.js';
 
 export async function searchUsers(req, res) {
   const { query, by } = req.query;
@@ -33,7 +35,8 @@ export async function searchUsers(req, res) {
   }
 
   const q = String(query).trim();
-  const currentUser = await User.findById(req.user.id);
+  const currentUserId = req.user.id;
+  const currentUser = await User.findById(currentUserId);
 
   const filter = { status: 'active' };
 
@@ -44,20 +47,96 @@ export async function searchUsers(req, res) {
   } else if (by === 'id') {
     filter.comradeId = q;
   } else {
-    // default: name/handle search
+    // default: name/comradeId search
     filter.$or = [
-      { comradeHandle: q.startsWith('@') ? q : `@${q}` },
+      { comradeId: { $regex: q, $options: 'i' } },
       { name: { $regex: q, $options: 'i' } },
     ];
   }
 
+  // GLOBAL PRIVACY FILTER: User must be searchable
+  filter['settings.isSearchable'] = { $ne: false };
+
   const users = await User.find(filter)
     .limit(20)
-    .select('name comradeHandle comradeId isOnline lastSeenAt');
+    .select('name comradeId isOnline lastSeenAt');
 
-  const sanitized = users.filter((u) => u._id.toString() !== currentUser._id.toString());
+  const sanitized = users.filter((u) => u._id.toString() !== currentUserId);
 
-  return res.json({ users: sanitized });
+  // Check relationship status for each user
+  const resultsWithStatus = await Promise.all(
+    sanitized.map(async (u) => {
+      const request = await ChatRequest.findOne({
+        $or: [
+          { sender: currentUserId, recipient: u._id },
+          { sender: u._id, recipient: currentUserId },
+        ],
+      });
+
+      let relationship = 'NONE';
+      let requestId = null;
+
+      if (request) {
+        requestId = request._id;
+        if (request.status === 'ACCEPTED') {
+          relationship = 'FRIEND';
+        } else if (request.status === 'PENDING') {
+          relationship = request.sender.toString() === currentUserId ? 'SENT' : 'RECEIVED';
+        } else if (request.status === 'REJECTED') {
+          // If rejected, we might want to treat as NONE to allow re-request if allowed, 
+          // but for now, let's return NONE so UI shows "Add Friend" if cool-down passed (logic elsewhere)
+          // or simple NONE. The request controller checks limits.
+          relationship = 'NONE';
+        }
+      }
+
+      return {
+        ...u.toObject(),
+        relationship,
+        requestId,
+      };
+    })
+  );
+
+  return res.json({ users: resultsWithStatus });
+}
+
+export async function getFriends(req, res) {
+  const userId = req.user.id;
+
+  // Find all accepted requests involving the user
+  const requests = await ChatRequest.find({
+    status: 'ACCEPTED',
+    $or: [{ sender: userId }, { recipient: userId }],
+  }).populate([{ path: 'sender', select: 'name comradeId isOnline lastSeenAt' }, { path: 'recipient', select: 'name comradeId isOnline lastSeenAt' }]);
+
+  const friends = requests.map(r => {
+    const isSender = r.sender._id.toString() === userId;
+    // Return the other person
+    return isSender ? r.recipient : r.sender;
+  });
+
+  return res.json({ friends });
+}
+
+export async function removeFriend(req, res) {
+  const userId = req.user.id;
+  const targetId = req.params.id;
+
+  // Find and remove the accepted request
+  const result = await ChatRequest.findOneAndDelete({
+    status: 'ACCEPTED',
+    $or: [
+      { sender: userId, recipient: targetId },
+      { sender: targetId, recipient: userId },
+    ],
+  });
+
+  if (!result) {
+    return res.status(404).json({ message: 'Friendship not found' });
+  }
+
+  return res.json({ message: 'Friend removed' });
 }
 
 export async function blockUser(req, res) {

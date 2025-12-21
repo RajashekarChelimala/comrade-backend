@@ -1,6 +1,7 @@
 import express from 'express';
 import { requireAuth } from '../middleware/auth.js';
 import {
+  createChat,
   listChats,
   getChat,
   getMessages,
@@ -14,6 +15,7 @@ export const chatRouter = express.Router();
 
 chatRouter.use(requireAuth);
 
+chatRouter.post('/', createChat);
 chatRouter.get('/', listChats);
 chatRouter.get('/:chatId', getChat);
 chatRouter.get('/:chatId/messages', getMessages);

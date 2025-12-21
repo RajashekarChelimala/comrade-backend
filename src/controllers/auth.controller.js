@@ -4,37 +4,15 @@ import { signAccessToken, signRefreshToken, verifyRefreshToken } from '../utils/
 import { getFeatureFlags } from '../config/featureFlags.js';
 import { sendVerificationEmail } from '../services/emailService.js';
 
-function generateComradeHandle(base) {
-  const cleaned = base.toLowerCase().replace(/[^a-z0-9]/g, '');
-  return `@${cleaned}`;
+// Helper to normalize comradeId
+function normalizeComradeId(id) {
+  return String(id).toLowerCase().replace(/[^a-z0-9_.]/g, ''); // Allow alphanumeric, underscore, dot
 }
 
-function generateComradeId() {
-  const n = Math.floor(100000 + Math.random() * 900000);
-  return `CM${n}`;
-}
-
-async function generateUniqueHandle(name) {
-  let attempt = 0;
-  while (attempt < 5) {
-    const base = attempt === 0 ? name : `${name}${attempt}`;
-    const handle = generateComradeHandle(base);
-    // eslint-disable-next-line no-await-in-loop
-    const existing = await User.findOne({ comradeHandle: handle });
-    if (!existing) return handle;
-    attempt += 1;
-  }
-  // fallback
-  return `${generateComradeHandle(name)}${Date.now().toString().slice(-4)}`;
-}
-
-async function generateUniqueComradeId() {
-  while (true) {
-    const id = generateComradeId();
-    // eslint-disable-next-line no-await-in-loop
-    const existing = await User.findOne({ comradeId: id });
-    if (!existing) return id;
-  }
+// Ensure comradeId is valid format
+function isValidComradeId(id) {
+  const regex = /^[a-z0-9_.]{3,30}$/;
+  return regex.test(id);
 }
 
 export async function register(req, res) {
@@ -43,46 +21,38 @@ export async function register(req, res) {
     return res.status(403).json({ message: 'Registration is temporarily disabled' });
   }
 
-  const { name, email, password, handle, comradeId: preferredComradeId } = req.body;
-  if (!name || !email || !password) {
-    return res.status(400).json({ message: 'Name, email and password are required' });
+  const { name, email, password, comradeId } = req.body;
+
+  if (!name || !email || !password || !comradeId) {
+    return res.status(400).json({ message: 'Name, email, password, and comradeId are required' });
   }
 
   const emailLower = email.toLowerCase();
+
+  // Validation: Only gmail.com addresses allow? (Preserving user rule)
   if (!emailLower.endsWith('@gmail.com')) {
     return res.status(400).json({ message: 'Only gmail.com addresses are allowed' });
   }
 
-  const existing = await User.findOne({ email: emailLower });
-  if (existing) {
+  const existingEmail = await User.findOne({ email: emailLower });
+  if (existingEmail) {
     return res.status(409).json({ message: 'Email is already registered' });
   }
 
+  // Validate and Check comradeId uniqueness
+  const normalizedId = normalizeComradeId(comradeId);
+  if (!isValidComradeId(normalizedId)) {
+    return res.status(400).json({
+      message: 'Comrade ID can only contain letters, numbers, underscores, and dots (3-30 characters)'
+    });
+  }
+
+  const existingId = await User.findOne({ comradeId: normalizedId });
+  if (existingId) {
+    return res.status(409).json({ message: 'Comrade ID is already taken' });
+  }
+
   const passwordHash = await bcrypt.hash(password, 10);
-
-  let comradeHandle = handle ? generateComradeHandle(handle) : await generateUniqueHandle(name);
-  const handleExists = await User.findOne({ comradeHandle });
-  if (handleExists) {
-    comradeHandle = await generateUniqueHandle(name);
-  }
-
-  let comradeId;
-  if (preferredComradeId) {
-    // normalize like Instagram-style ID: lowercased, alphanumeric + underscore
-    const normalized = String(preferredComradeId)
-      .toLowerCase()
-      .replace(/[^a-z0-9_]/g, '');
-    if (!normalized) {
-      return res.status(400).json({ message: 'Invalid comradeId format' });
-    }
-    const existsId = await User.findOne({ comradeId: normalized });
-    if (existsId) {
-      return res.status(409).json({ message: 'Comrade ID is already taken' });
-    }
-    comradeId = normalized;
-  } else {
-    comradeId = await generateUniqueComradeId();
-  }
 
   const verificationCode = String(Math.floor(100000 + Math.random() * 900000));
   const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
@@ -91,8 +61,7 @@ export async function register(req, res) {
     name,
     email: emailLower,
     passwordHash,
-    comradeHandle,
-    comradeId,
+    comradeId: normalizedId,
     emailVerified: false,
     emailVerificationCode: verificationCode,
     emailVerificationExpiresAt: expiresAt,
@@ -116,7 +85,6 @@ export async function register(req, res) {
       id: user._id,
       name: user.name,
       email: user.email,
-      comradeHandle: user.comradeHandle,
       comradeId: user.comradeId,
       emailVerified: user.emailVerified,
     },
@@ -179,8 +147,8 @@ export async function login(req, res) {
       id: user._id,
       name: user.name,
       email: user.email,
-      comradeHandle: user.comradeHandle,
       comradeId: user.comradeId,
+      role: user.role,
     },
     tokens: {
       accessToken,
@@ -236,7 +204,7 @@ export async function refresh(req, res) {
 
 export async function me(req, res) {
   const user = await User.findById(req.user.id).select(
-    'name email comradeHandle comradeId status role settings lastSeenAt isOnline',
+    'name email comradeId status role settings lastSeenAt isOnline',
   );
   if (!user) {
     return res.status(404).json({ message: 'User not found' });

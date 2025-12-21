@@ -64,7 +64,7 @@ export async function sendRequest(req, res) {
 export async function getIncomingRequests(req, res) {
   const userId = req.user.id;
   const requests = await ChatRequest.find({ recipient: userId, status: 'PENDING' })
-    .populate('sender', 'name comradeHandle comradeId')
+    .populate('sender', 'name comradeId')
     .sort({ createdAt: -1 });
   return res.json({ requests });
 }
@@ -72,7 +72,7 @@ export async function getIncomingRequests(req, res) {
 export async function getOutgoingRequests(req, res) {
   const userId = req.user.id;
   const requests = await ChatRequest.find({ sender: userId })
-    .populate('recipient', 'name comradeHandle comradeId')
+    .populate('recipient', 'name comradeId')
     .sort({ createdAt: -1 });
   return res.json({ requests });
 }

@@ -4,6 +4,33 @@ import { User } from '../models/User.js';
 import { encryptForChat, decryptForChat } from '../utils/encryption.js';
 import { getFeatureFlags } from '../config/featureFlags.js';
 import { getIO } from '../socket/index.js';
+import { v4 as uuidv4 } from 'uuid';
+
+export async function createChat(req, res) {
+  const { recipientId } = req.body;
+  const userId = req.user.id;
+
+  if (!recipientId) return res.status(400).json({ message: 'Recipient ID required' });
+
+  // Check if chat exists
+  let chat = await Chat.findOne({
+    isGroup: false,
+    participants: { $all: [userId, recipientId] },
+  });
+
+  if (!chat) {
+    chat = await Chat.create({
+      chatId: uuidv4(), // Generate a unique string ID
+      participants: [userId, recipientId],
+      isGroup: false,
+    });
+  }
+
+  // Ensure fully populated
+  await chat.populate('participants', 'name comradeId isOnline lastSeenAt');
+
+  return res.json({ chat });
+}
 
 async function isBlockedBetween(userId, otherId) {
   const [me, other] = await Promise.all([
@@ -21,7 +48,7 @@ export async function listChats(req, res) {
   const chats = await Chat.find({ participants: userId })
     .sort({ lastMessageAt: -1 })
     .select('chatId participants lastMessageAt lastMessagePreview')
-    .populate('participants', 'name comradeHandle comradeId');
+    .populate('participants', 'name comradeId');
 
   return res.json({ chats });
 }
@@ -31,7 +58,7 @@ export async function getChat(req, res) {
   const userId = req.user.id;
 
   const chat = await Chat.findOne({ chatId, participants: userId })
-    .populate('participants', 'name comradeHandle comradeId');
+    .populate('participants', 'name comradeId isOnline lastSeenAt');
 
   if (!chat) {
     return res.status(404).json({ message: 'Chat not found' });
@@ -58,8 +85,8 @@ export async function getMessages(req, res) {
   const messages = await Message.find(match)
     .sort({ createdAt: -1 })
     .limit(Number(limit))
-    .populate('sender', 'name comradeHandle comradeId')
-    .populate({ path: 'replyTo', populate: { path: 'sender', select: 'name comradeHandle comradeId' } });
+    .populate('sender', 'name comradeId')
+    .populate({ path: 'replyTo', populate: { path: 'sender', select: 'name comradeId' } });
 
   const result = messages
     .map((m) => {
@@ -154,7 +181,7 @@ export async function sendMessage(req, res) {
   // Optional reply target
   let replyToDoc = null;
   if (replyTo) {
-    replyToDoc = await Message.findById(replyTo).populate('sender', 'name comradeHandle comradeId');
+    replyToDoc = await Message.findById(replyTo).populate('sender', 'name comradeId');
     if (!replyToDoc || replyToDoc.chat.toString() !== chat._id.toString()) {
       replyToDoc = null;
     }
@@ -177,8 +204,8 @@ export async function sendMessage(req, res) {
   await chat.save();
 
   const populated = await message.populate([
-    { path: 'sender', select: 'name comradeHandle comradeId' },
-    { path: 'replyTo', populate: { path: 'sender', select: 'name comradeHandle comradeId' } },
+    { path: 'sender', select: 'name comradeId' },
+    { path: 'replyTo', populate: { path: 'sender', select: 'name comradeId' } },
   ]);
 
   let replyPreview = null;

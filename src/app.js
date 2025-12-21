@@ -1,9 +1,9 @@
+import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import morgan from 'morgan';
 import cookieParser from 'cookie-parser';
-import dotenv from 'dotenv';
 
 import { featureFlagsRouter } from './routes/config.routes.js';
 import { authRouter } from './routes/auth.routes.js';
@@ -14,7 +14,7 @@ import { chatRouter } from './routes/chat.routes.js';
 import { mediaRouter } from './routes/media.routes.js';
 import { csrfProtection } from './middleware/csrf.js';
 
-dotenv.config();
+
 
 const app = express();
 
