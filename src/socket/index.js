@@ -27,7 +27,7 @@ export function initSocket(io) {
     if (userId) {
       try {
         await User.findByIdAndUpdate(userId, { isOnline: true });
-        // Optionally emit to friends/global that user is online
+        io.emit('user_status_change', { userId, isOnline: true });
       } catch (error) {
         console.error('Error updating online status (connect):', error);
       }
@@ -60,10 +60,12 @@ export function initSocket(io) {
 
       if (userId) {
         try {
+          const now = new Date();
           await User.findByIdAndUpdate(userId, {
             isOnline: false,
-            lastSeenAt: new Date()
+            lastSeenAt: now
           });
+          io.emit('user_status_change', { userId, isOnline: false, lastSeenAt: now });
         } catch (error) {
           console.error('Error updating online status (disconnect):', error);
         }

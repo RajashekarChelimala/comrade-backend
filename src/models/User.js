@@ -27,7 +27,7 @@ const userSchema = new mongoose.Schema(
     role: { type: String, enum: ['user', 'admin'], default: 'user' },
     status: {
       type: String,
-      enum: ['active', 'blocked_due_to_reports', 'blocked_manual', 'deleted'],
+      enum: ['active', 'blocked_due_to_reports', 'blocked_manual', 'deleted', 'pending_approval'],
       default: 'active',
     },
     deletedAt: { type: Date },

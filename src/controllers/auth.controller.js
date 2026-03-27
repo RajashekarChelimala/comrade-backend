@@ -2,7 +2,7 @@ import bcrypt from 'bcryptjs';
 import { User } from '../models/User.js';
 import { signAccessToken, signRefreshToken, verifyRefreshToken } from '../utils/jwt.js';
 import { getFeatureFlags } from '../config/featureFlags.js';
-import { sendVerificationEmail } from '../services/emailService.js';
+
 
 // Helper to normalize comradeId
 function normalizeComradeId(id) {
@@ -54,39 +54,23 @@ export async function register(req, res) {
 
   const passwordHash = await bcrypt.hash(password, 10);
 
-  const verificationCode = String(Math.floor(100000 + Math.random() * 900000));
-  const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
-
   const user = await User.create({
     name,
     email: emailLower,
     passwordHash,
     comradeId: normalizedId,
-    emailVerified: false,
-    emailVerificationCode: verificationCode,
-    emailVerificationExpiresAt: expiresAt,
+    status: 'pending_approval',
+    emailVerified: true,
   });
 
-  try {
-    await sendVerificationEmail(user.email, verificationCode);
-    console.log('Verification email sent successfully to:', user.email);
-  } catch (emailError) {
-    console.error('Failed to send verification email during registration:', {
-      email: user.email,
-      error: emailError.message,
-      stack: emailError.stack
-    });
-    // User is created but email failed - we'll let them know to request a new code
-  }
-
   return res.status(201).json({
-    message: 'Registration successful. Please check your email for the verification code.',
+    message: 'Registration request sent to admin for approval.',
     user: {
       id: user._id,
       name: user.name,
       email: user.email,
       comradeId: user.comradeId,
-      emailVerified: user.emailVerified,
+      status: user.status,
     },
   });
 }
@@ -109,6 +93,10 @@ export async function login(req, res) {
 
   if (!user.emailVerified) {
     return res.status(403).json({ message: 'Please verify your email before logging in' });
+  }
+
+  if (user.status === 'pending_approval') {
+    return res.status(403).json({ message: 'Account is pending admin approval' });
   }
 
   if (user.status !== 'active') {
@@ -212,76 +200,3 @@ export async function me(req, res) {
   return res.json({ user });
 }
 
-export async function verifyEmail(req, res) {
-  const { email, code } = req.body;
-  if (!email || !code) {
-    return res.status(400).json({ message: 'Email and code are required' });
-  }
-
-  const emailLower = email.toLowerCase();
-  const user = await User.findOne({ email: emailLower });
-  if (!user) {
-    return res.status(404).json({ message: 'User not found' });
-  }
-
-  if (user.emailVerified) {
-    return res.status(400).json({ message: 'Email already verified' });
-  }
-
-  if (!user.emailVerificationCode || !user.emailVerificationExpiresAt) {
-    return res.status(400).json({ message: 'No active verification code' });
-  }
-
-  if (user.emailVerificationExpiresAt < new Date()) {
-    return res.status(400).json({ message: 'Verification code has expired' });
-  }
-
-  if (String(code).trim() !== user.emailVerificationCode) {
-    return res.status(400).json({ message: 'Invalid verification code' });
-  }
-
-  user.emailVerified = true;
-  user.emailVerificationCode = undefined;
-  user.emailVerificationExpiresAt = undefined;
-  await user.save();
-
-  return res.json({ message: 'Email verified successfully' });
-}
-
-export async function resendVerification(req, res) {
-  const { email } = req.body;
-  if (!email) {
-    return res.status(400).json({ message: 'Email is required' });
-  }
-
-  const emailLower = email.toLowerCase();
-  const user = await User.findOne({ email: emailLower });
-  if (!user) {
-    return res.status(404).json({ message: 'User not found' });
-  }
-
-  if (user.emailVerified) {
-    return res.status(400).json({ message: 'Email already verified' });
-  }
-
-  const verificationCode = String(Math.floor(100000 + Math.random() * 900000));
-  const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
-
-  user.emailVerificationCode = verificationCode;
-  user.emailVerificationExpiresAt = expiresAt;
-  await user.save();
-
-  try {
-    await sendVerificationEmail(user.email, verificationCode);
-    console.log('Verification email resent successfully to:', user.email);
-  } catch (emailError) {
-    console.error('Failed to resend verification email:', {
-      email: user.email,
-      error: emailError.message,
-      stack: emailError.stack
-    });
-    // Still return success to user, but log the error
-  }
-
-  return res.json({ message: 'Verification code resent' });
-}

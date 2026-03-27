@@ -3,6 +3,7 @@ import { FeatureFlag } from '../models/FeatureFlag.js';
 import { Report } from '../models/Report.js';
 import { UnblockRequest } from '../models/UnblockRequest.js';
 import { refreshFeatureFlags } from '../config/featureFlags.js';
+import bcrypt from 'bcryptjs';
 
 export async function getAllUsers(req, res) {
   const users = await User.find()
@@ -31,6 +32,40 @@ export async function updateFlag(req, res) {
 }
 
 // Missing functions required by admin.routes.js
+
+export async function getPendingUsers(req, res) {
+  const users = await User.find({ status: 'pending_approval' })
+    .select('name email comradeId createdAt status')
+    .sort({ createdAt: -1 });
+  return res.json({ users });
+}
+
+export async function approveUser(req, res) {
+  const { id } = req.params;
+  const user = await User.findById(id);
+  if (!user) return res.status(404).json({ message: 'User not found' });
+  
+  if (user.status !== 'pending_approval') {
+    return res.status(400).json({ message: 'User is not pending approval' });
+  }
+
+  user.status = 'active';
+  await user.save();
+  return res.json({ message: 'User approved successfully' });
+}
+
+export async function rejectUser(req, res) {
+  const { id } = req.params;
+  const user = await User.findById(id);
+  if (!user) return res.status(404).json({ message: 'User not found' });
+  
+  if (user.status !== 'pending_approval') {
+    return res.status(400).json({ message: 'User is not pending approval' });
+  }
+
+  await User.findByIdAndDelete(id);
+  return res.json({ message: 'User registration rejected and deleted' });
+}
 
 export async function getReportedUsers(req, res) {
   // Find users who have reports
@@ -81,4 +116,46 @@ export async function rejectUnblockRequest(req, res) {
   await request.save();
 
   return res.json({ message: 'Request rejected' });
+}
+
+export async function deleteUser(req, res) {
+  const { id } = req.params;
+  const user = await User.findById(id);
+  if (!user) return res.status(404).json({ message: 'User not found' });
+  if (user.role === 'admin') return res.status(403).json({ message: 'Cannot delete admin users' });
+
+  await User.findByIdAndDelete(id);
+  return res.json({ message: 'User deleted successfully' });
+}
+
+export async function createUser(req, res) {
+  const { name, email, comradeId, password, role } = req.body;
+
+  if (!name || !email || !comradeId || !password) {
+    return res.status(400).json({ message: 'name, email, comradeId, and password are required' });
+  }
+
+  const existing = await User.findOne({ $or: [{ email }, { comradeId }] });
+  if (existing) {
+    return res.status(409).json({ message: 'A user with that email or comradeId already exists' });
+  }
+
+  const salt = await bcrypt.genSalt(10);
+  const passwordHash = await bcrypt.hash(password, salt);
+
+  const newUser = await User.create({
+    name,
+    email,
+    comradeId,
+    passwordHash,
+    role: role || 'user',
+    emailVerified: true,
+    status: 'active',
+    settings: { isSearchable: true, searchableByEmail: true, showLastSeen: true },
+  });
+
+  return res.status(201).json({
+    message: 'User created successfully',
+    user: { _id: newUser._id, name: newUser.name, email: newUser.email, comradeId: newUser.comradeId, role: newUser.role, status: newUser.status },
+  });
 }

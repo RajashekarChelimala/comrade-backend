@@ -1,5 +1,5 @@
 import express from 'express';
-import { register, login, refresh, me, verifyEmail, resendVerification } from '../controllers/auth.controller.js';
+import { register, login, refresh, me } from '../controllers/auth.controller.js';
 import { requireAuth } from '../middleware/auth.js';
 
 export const authRouter = express.Router();
@@ -12,5 +12,3 @@ authRouter.post('/refresh', refresh);
 
 authRouter.get('/me', requireAuth, me);
 
-authRouter.post('/verify-email', verifyEmail);
-authRouter.post('/resend-verification', resendVerification);

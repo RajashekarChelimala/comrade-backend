@@ -129,10 +129,13 @@ export async function getMessages(req, res) {
         content,
         mediaUrl: m.mediaUrl,
         mediaType: m.mediaType,
+        fileName: m.fileName,
+        fileSize: m.fileSize,
         isSaved: m.isSaved,
         expiresAt: m.expiresAt,
         isDeleted: m.isDeleted,
         reactions: m.reactions,
+        readBy: m.readBy,
         createdAt: m.createdAt,
         replyTo: replyPreview,
       };
@@ -150,7 +153,7 @@ export async function sendMessage(req, res) {
 
   const { chatId } = req.params;
   const userId = req.user.id;
-  const { type, text, mediaUrl, mediaType, mediaPublicId, replyTo } = req.body;
+  const { type, text, mediaUrl, mediaType, mediaPublicId, fileName, fileSize, replyTo, tempId } = req.body;
 
   const chat = await Chat.findOne({ chatId, participants: userId });
   if (!chat) {
@@ -195,6 +198,8 @@ export async function sendMessage(req, res) {
     mediaUrl,
     mediaType,
     mediaPublicId,
+    fileName,
+    fileSize,
     expiresAt,
     replyTo: replyToDoc ? replyToDoc._id : undefined,
   });
@@ -232,6 +237,7 @@ export async function sendMessage(req, res) {
   if (io) {
     io.to(`chat:${chat.chatId}`).emit('chat:new_message', {
       chatId: chat.chatId,
+      tempId,
       message: {
         id: populated._id,
         sender: populated.sender,
@@ -239,10 +245,13 @@ export async function sendMessage(req, res) {
         content: type === 'text' ? text : null,
         mediaUrl: populated.mediaUrl,
         mediaType: populated.mediaType,
+        fileName: populated.fileName,
+        fileSize: populated.fileSize,
         isSaved: populated.isSaved,
         expiresAt: populated.expiresAt,
         isDeleted: populated.isDeleted,
         reactions: populated.reactions,
+        readBy: populated.readBy,
         createdAt: populated.createdAt,
         replyTo: replyPreview,
       },
@@ -257,14 +266,55 @@ export async function sendMessage(req, res) {
       content: type === 'text' ? text : null,
       mediaUrl: populated.mediaUrl,
       mediaType: populated.mediaType,
+      fileName: populated.fileName,
+      fileSize: populated.fileSize,
       isSaved: populated.isSaved,
       expiresAt: populated.expiresAt,
       isDeleted: populated.isDeleted,
       reactions: populated.reactions,
+      readBy: populated.readBy,
       createdAt: populated.createdAt,
       replyTo: replyPreview,
     },
   });
+}
+
+export async function markChatAsRead(req, res) {
+  const { chatId } = req.params;
+  const userId = req.user.id;
+
+  const chat = await Chat.findOne({ chatId, participants: userId });
+  if (!chat) return res.status(404).json({ message: 'Chat not found' });
+
+  // Find unread messages from others
+  const unreadMessages = await Message.find({
+    chat: chat._id,
+    sender: { $ne: userId },
+    'readBy.user': { $ne: userId }
+  });
+
+  if (unreadMessages.length === 0) {
+    return res.json({ message: 'No unread messages', count: 0 });
+  }
+
+  const unreadIds = unreadMessages.map(m => m._id);
+
+  await Message.updateMany(
+    { _id: { $in: unreadIds } },
+    { $push: { readBy: { user: userId, readAt: new Date() } } }
+  );
+
+  const io = getIO();
+  if (io) {
+    io.to(`chat:${chat.chatId}`).emit('chat:messages_read', {
+      chatId: chat.chatId,
+      messageIds: unreadIds,
+      readByUserId: userId,
+      readAt: new Date()
+    });
+  }
+
+  return res.json({ message: 'Messages marked as read', count: unreadIds.length });
 }
 
 export async function reactToMessage(req, res) {

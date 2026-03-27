@@ -9,11 +9,14 @@ import {
   reactToMessage,
   removeReaction,
   saveMedia,
+  markChatAsRead,
 } from '../controllers/chat.controller.js';
 
 export const chatRouter = express.Router();
 
 chatRouter.use(requireAuth);
+
+chatRouter.post('/:chatId/read', markChatAsRead);
 
 chatRouter.post('/', createChat);
 chatRouter.get('/', listChats);

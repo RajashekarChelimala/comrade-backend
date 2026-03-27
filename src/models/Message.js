@@ -33,8 +33,10 @@ const messageSchema = new mongoose.Schema(
     replyTo: { type: mongoose.Schema.Types.ObjectId, ref: 'Message' },
 
     mediaUrl: { type: String },
-    mediaType: { type: String, enum: ['image', 'video'] },
+    mediaType: { type: String }, // Removed enum restriction to allow raw/document files
     mediaPublicId: { type: String },
+    fileName: { type: String },
+    fileSize: { type: Number },
     isSaved: { type: Boolean, default: false },
     expiresAt: { type: Date },
     isDeleted: { type: Boolean, default: false },
