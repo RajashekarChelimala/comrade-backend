@@ -3,6 +3,7 @@ import { requireAuth } from '../middleware/auth.js';
 import {
   getMe,
   updateMe,
+  updateMood,
   searchUsers,
   blockUser,
   unblockUser,
@@ -20,6 +21,7 @@ userRouter.use(requireAuth);
 
 userRouter.get('/me', getMe);
 userRouter.patch('/me', updateMe);
+userRouter.patch('/me/mood', updateMood);
 userRouter.get('/search', searchUsers);
 userRouter.get('/friends', getFriends);
 userRouter.delete('/friends/:id', removeFriend);

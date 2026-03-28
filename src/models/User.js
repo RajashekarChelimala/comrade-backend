@@ -45,6 +45,19 @@ const userSchema = new mongoose.Schema(
     emailVerified: { type: Boolean, default: false },
     emailVerificationCode: { type: String },
     emailVerificationExpiresAt: { type: Date },
+
+    mood: {
+      type: String,
+      enum: ['happy', 'sad', 'busy', 'tired', 'excited', 'neutral'],
+      default: 'neutral'
+    },
+    customStatus: { type: String, trim: true, maxLength: 100 },
+    sessions: [
+      {
+        device: { type: String },
+        lastActive: { type: Date, default: Date.now },
+      },
+    ],
   },
   { timestamps: true },
 );

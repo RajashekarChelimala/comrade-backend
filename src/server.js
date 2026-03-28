@@ -6,6 +6,7 @@ import app from './app.js';
 import { initSocket } from './socket/index.js';
 import { connectDb } from './config/db.js';
 import { scheduleMediaCleanupJob } from './jobs/mediaCleanup.js';
+import { scheduleScheduledMessagesJob } from './jobs/scheduledMessages.js';
 
 const PORT = process.env.PORT || 5000;
 
@@ -91,6 +92,7 @@ async function start() {
   initSocket(io);
 
   scheduleMediaCleanupJob();
+  scheduleScheduledMessagesJob();
 
   server.listen(PORT, () => {
     // eslint-disable-next-line no-console

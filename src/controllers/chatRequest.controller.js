@@ -95,7 +95,9 @@ export async function acceptRequest(req, res) {
   }
 
   const existingChat = await Chat.findOne({
-    participants: { $all: [request.sender, request.recipient], $size: 2 },
+    isGroup: false,
+    'participants.user': { $all: [request.sender, request.recipient] },
+    participants: { $size: 2 }
   });
 
   let chat = existingChat;
@@ -104,7 +106,10 @@ export async function acceptRequest(req, res) {
     const chatId = `chat_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
     chat = await Chat.create({
       chatId,
-      participants: [request.sender, request.recipient],
+      participants: [
+        { user: request.sender, role: 'admin' },
+        { user: request.recipient, role: 'admin' },
+      ],
       createdBy: request.sender,
       encryption,
     });

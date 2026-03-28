@@ -21,15 +21,37 @@ const chatSchema = new mongoose.Schema(
   {
     chatId: { type: String, required: true, unique: true, index: true },
     participants: [
-      { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+      {
+        user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+        role: { type: String, enum: ['admin', 'moderator', 'member'], default: 'member' },
+      },
     ],
     createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+
+    isGroup: { type: Boolean, default: false },
+    name: { type: String, trim: true },
+    avatar: { type: String },
 
     encryption: { type: encryptionSchema, required: true },
 
     lastMessageAt: { type: Date },
     lastMessagePreview: { type: String },
     unreadCounts: [unreadSchema],
+
+    subChannels: [
+      {
+        id: { type: String, required: true },
+        name: { type: String, required: true },
+      },
+    ],
+
+    pinnedMessages: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Message' }],
+
+    settings: {
+      themeColor: { type: String, default: '#6366f1' },
+      backgroundImage: { type: String },
+      chatLockPin: { type: String }, // Hashed PIN for lock
+    },
   },
   { timestamps: true },
 );

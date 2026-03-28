@@ -1,12 +1,13 @@
 import { User } from '../models/User.js';
 import { Report } from '../models/Report.js';
 import { UnblockRequest } from '../models/UnblockRequest.js';
+import { getIO } from '../socket/index.js';
 
 const REPORT_THRESHOLD = 10;
 
 export async function getMe(req, res) {
   const user = await User.findById(req.user.id).select(
-    'name email comradeId status role settings lastSeenAt isOnline blockedUsers mutedUsers',
+    'name email comradeId status role settings lastSeenAt isOnline blockedUsers mutedUsers mood customStatus',
   );
   if (!user) {
     return res.status(404).json({ message: 'User not found' });
@@ -14,16 +15,48 @@ export async function getMe(req, res) {
   return res.json({ user });
 }
 
+export function getSessions(req, res) {
+  // Mock sessions for now since we just added the field
+  const sessions = [
+    { id: '1', device: 'Windows Desktop (Chrome)', lastActive: new Date() },
+    { id: '2', device: 'iPhone 15 (Mobile App)', lastActive: new Date(Date.now() - 3600000) }
+  ];
+  return res.json({ sessions });
+}
+
+
 export async function updateMe(req, res) {
-  const { name, settings } = req.body;
+  const { name, settings, mood, customStatus } = req.body;
   const update = {};
   if (name) update.name = name;
   if (settings) update.settings = settings;
+  if (mood) update.mood = mood;
+  if (customStatus !== undefined) update.customStatus = customStatus;
 
   const user = await User.findByIdAndUpdate(req.user.id, update, {
     new: true,
-  }).select('name email comradeId status role settings lastSeenAt isOnline');
+  }).select('name email comradeId status role settings lastSeenAt isOnline mood customStatus');
   return res.json({ user });
+}
+
+export async function updateMood(req, res) {
+  const { mood, customStatus } = req.body;
+  const user = await User.findByIdAndUpdate(
+    req.user.id,
+    { mood, customStatus },
+    { new: true }
+  ).select('mood customStatus');
+
+  const io = getIO();
+  if (io) {
+    io.emit('user_status_change', {
+      userId: req.user.id,
+      mood: user.mood,
+      customStatus: user.customStatus,
+    });
+  }
+
+  return res.json({ mood: user.mood, customStatus: user.customStatus });
 }
 
 import { ChatRequest } from '../models/ChatRequest.js';

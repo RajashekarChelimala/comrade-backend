@@ -1,7 +1,10 @@
 import { Chat } from '../models/Chat.js';
 import { Message } from '../models/Message.js';
 import { User } from '../models/User.js';
+import { Memory } from '../models/Memory.js';
+import { Task } from '../models/Task.js';
 import { encryptForChat, decryptForChat } from '../utils/encryption.js';
+import { generateChatKey } from '../utils/encryption.js';
 import { getFeatureFlags } from '../config/featureFlags.js';
 import { getIO } from '../socket/index.js';
 import { v4 as uuidv4 } from 'uuid';
@@ -15,19 +18,26 @@ export async function createChat(req, res) {
   // Check if chat exists
   let chat = await Chat.findOne({
     isGroup: false,
-    participants: { $all: [userId, recipientId] },
+    'participants.user': { $all: [userId, recipientId] },
+    participants: { $size: 2 }
   });
 
   if (!chat) {
+    const encryption = generateChatKey();
     chat = await Chat.create({
-      chatId: uuidv4(), // Generate a unique string ID
-      participants: [userId, recipientId],
+      chatId: uuidv4(),
+      participants: [
+        { user: userId, role: 'admin' },
+        { user: recipientId, role: 'admin' },
+      ],
       isGroup: false,
+      createdBy: userId,
+      encryption,
     });
   }
 
   // Ensure fully populated
-  await chat.populate('participants', 'name comradeId isOnline lastSeenAt');
+  await chat.populate('participants.user', 'name comradeId isOnline lastSeenAt mood customStatus');
 
   return res.json({ chat });
 }
@@ -45,10 +55,10 @@ async function isBlockedBetween(userId, otherId) {
 
 export async function listChats(req, res) {
   const userId = req.user.id;
-  const chats = await Chat.find({ participants: userId })
+  const chats = await Chat.find({ 'participants.user': userId })
     .sort({ lastMessageAt: -1 })
-    .select('chatId participants lastMessageAt lastMessagePreview')
-    .populate('participants', 'name comradeId');
+    .select('chatId participants lastMessageAt lastMessagePreview isGroup name avatar settings')
+    .populate('participants.user', 'name comradeId isOnline lastSeenAt mood');
 
   return res.json({ chats });
 }
@@ -57,8 +67,12 @@ export async function getChat(req, res) {
   const { chatId } = req.params;
   const userId = req.user.id;
 
-  const chat = await Chat.findOne({ chatId, participants: userId })
-    .populate('participants', 'name comradeId isOnline lastSeenAt');
+  const chat = await Chat.findOne({ chatId, 'participants.user': userId })
+    .populate('participants.user', 'name comradeId isOnline lastSeenAt mood customStatus')
+    .populate({
+      path: 'pinnedMessages',
+      populate: { path: 'sender', select: 'name comradeId' }
+    });
 
   if (!chat) {
     return res.status(404).json({ message: 'Chat not found' });
@@ -72,12 +86,18 @@ export async function getMessages(req, res) {
   const { before, limit = 30 } = req.query;
   const userId = req.user.id;
 
-  const chat = await Chat.findOne({ chatId, participants: userId });
+  const chat = await Chat.findOne({ chatId, 'participants.user': userId });
   if (!chat) {
     return res.status(404).json({ message: 'Chat not found' });
   }
 
-  const match = { chat: chat._id };
+  const match = { 
+    chat: chat._id,
+    $or: [
+      { isScheduled: { $ne: true } },
+      { sender: userId }
+    ]
+  };
   if (before) {
     match.createdAt = { $lt: new Date(before) };
   }
@@ -138,11 +158,47 @@ export async function getMessages(req, res) {
         readBy: m.readBy,
         createdAt: m.createdAt,
         replyTo: replyPreview,
+        pollData: m.pollData,
+        gameData: m.gameData,
+        isScheduled: m.isScheduled,
+        scheduledFor: m.scheduledFor,
+        isSurprise: m.isSurprise,
+        unlockAt: m.unlockAt,
+        editHistory: m.editHistory,
       };
     })
     .reverse();
 
   return res.json({ messages: result });
+}
+
+export async function deleteMessage(req, res) {
+  const { messageId } = req.params;
+  const userId = req.user.id;
+
+  const message = await Message.findById(messageId).populate('chat');
+  if (!message) return res.status(404).json({ message: 'Message not found' });
+
+  const isSender = message.sender.toString() === userId;
+  if (!isSender) return res.status(403).json({ message: 'Only sender can delete their message' });
+
+  message.isDeleted = true;
+  message.encryptedContent = encryptForChat(message.chat, 'This message was deleted');
+  message.mediaUrl = null;
+  message.pollData = null;
+  message.gameData = null;
+  await message.save();
+
+  const io = getIO();
+  if (io) {
+    io.to(`chat:${message.chat.chatId}`).emit('chat:message_updated', {
+      messageId: message._id,
+      isDeleted: true,
+      content: message.content
+    });
+  }
+
+  return res.json({ message: 'Message deleted' });
 }
 
 export async function sendMessage(req, res) {
@@ -153,17 +209,25 @@ export async function sendMessage(req, res) {
 
   const { chatId } = req.params;
   const userId = req.user.id;
-  const { type, text, mediaUrl, mediaType, mediaPublicId, fileName, fileSize, replyTo, tempId } = req.body;
+  const {
+    type, text, mediaUrl, mediaType, mediaPublicId, fileName, fileSize,
+    replyTo, tempId, pollData, gameData, isScheduled, scheduledFor,
+    isSurprise, unlockAt
+  } = req.body;
 
-  const chat = await Chat.findOne({ chatId, participants: userId });
+  const chat = await Chat.findOne({ chatId, 'participants.user': userId });
   if (!chat) {
     return res.status(404).json({ message: 'Chat not found' });
   }
 
-  const otherId = chat.participants.find((id) => id.toString() !== userId);
-  const blocked = await isBlockedBetween(userId, otherId);
-  if (blocked) {
-    return res.status(403).json({ message: 'You cannot message this user' });
+  if (!chat.isGroup) {
+    const otherId = chat.participants.find((p) => p.user.toString() !== userId)?.user;
+    if (otherId) {
+      const blocked = await isBlockedBetween(userId, otherId);
+      if (blocked) {
+        return res.status(403).json({ message: 'You cannot message this user' });
+      }
+    }
   }
 
   if (type === 'text' && !text) {
@@ -190,7 +254,7 @@ export async function sendMessage(req, res) {
     }
   }
 
-  const message = await Message.create({
+  const messageData = {
     chat: chat._id,
     sender: userId,
     type,
@@ -202,11 +266,21 @@ export async function sendMessage(req, res) {
     fileSize,
     expiresAt,
     replyTo: replyToDoc ? replyToDoc._id : undefined,
-  });
+    pollData,
+    gameData,
+    isScheduled,
+    scheduledFor,
+    isSurprise,
+    unlockAt,
+  };
 
-  chat.lastMessageAt = message.createdAt;
-  chat.lastMessagePreview = type === 'text' ? (text || '') : '[media]';
-  await chat.save();
+  const message = await Message.create(messageData);
+
+  if (!isScheduled) {
+    chat.lastMessageAt = message.createdAt;
+    chat.lastMessagePreview = type === 'text' ? (text || '') : `[${type}]`;
+    await chat.save();
+  }
 
   const populated = await message.populate([
     { path: 'sender', select: 'name comradeId' },
@@ -234,12 +308,13 @@ export async function sendMessage(req, res) {
     };
   }
   const io = getIO();
-  if (io) {
+  if (io && !isScheduled) {
     io.to(`chat:${chat.chatId}`).emit('chat:new_message', {
       chatId: chat.chatId,
       tempId,
       message: {
         id: populated._id,
+        tempId,
         sender: populated.sender,
         type: populated.type,
         content: type === 'text' ? text : null,
@@ -254,6 +329,10 @@ export async function sendMessage(req, res) {
         readBy: populated.readBy,
         createdAt: populated.createdAt,
         replyTo: replyPreview,
+        pollData: populated.pollData,
+        gameData: populated.gameData,
+        isSurprise: populated.isSurprise,
+        unlockAt: populated.unlockAt,
       },
     });
   }
@@ -261,6 +340,7 @@ export async function sendMessage(req, res) {
   return res.status(201).json({
     message: {
       id: populated._id,
+      tempId,
       sender: populated.sender,
       type: populated.type,
       content: type === 'text' ? text : null,
@@ -275,6 +355,12 @@ export async function sendMessage(req, res) {
       readBy: populated.readBy,
       createdAt: populated.createdAt,
       replyTo: replyPreview,
+      pollData: populated.pollData,
+      gameData: populated.gameData,
+      isScheduled: populated.isScheduled,
+      scheduledFor: populated.scheduledFor,
+      isSurprise: populated.isSurprise,
+      unlockAt: populated.unlockAt,
     },
   });
 }
@@ -283,7 +369,7 @@ export async function markChatAsRead(req, res) {
   const { chatId } = req.params;
   const userId = req.user.id;
 
-  const chat = await Chat.findOne({ chatId, participants: userId });
+  const chat = await Chat.findOne({ chatId, 'participants.user': userId });
   if (!chat) return res.status(404).json({ message: 'Chat not found' });
 
   // Find unread messages from others
@@ -336,7 +422,7 @@ export async function reactToMessage(req, res) {
     return res.status(404).json({ message: 'Message not found' });
   }
 
-  const isParticipant = message.chat.participants.some((id) => id.toString() === userId);
+  const isParticipant = message.chat.participants.some((p) => p.user.toString() === userId);
   if (!isParticipant) {
     return res.status(403).json({ message: 'Not allowed' });
   }
@@ -376,7 +462,7 @@ export async function removeReaction(req, res) {
     return res.status(404).json({ message: 'Message not found' });
   }
 
-  const isParticipant = message.chat.participants.some((id) => id.toString() === userId);
+  const isParticipant = message.chat.participants.some((p) => p.user.toString() === userId);
   if (!isParticipant) {
     return res.status(403).json({ message: 'Not allowed' });
   }
@@ -404,7 +490,7 @@ export async function saveMedia(req, res) {
     return res.status(404).json({ message: 'Message not found' });
   }
 
-  const isParticipant = message.chat.participants.some((id) => id.toString() === userId);
+  const isParticipant = message.chat.participants.some((p) => p.user.toString() === userId);
   if (!isParticipant) {
     return res.status(403).json({ message: 'Not allowed' });
   }
@@ -418,4 +504,310 @@ export async function saveMedia(req, res) {
   await message.save();
 
   return res.json({ message: 'Media saved' });
+}
+
+export async function createGroupChat(req, res) {
+  const { name, participantIds, avatar } = req.body;
+  const userId = req.user.id;
+
+  if (!name || !participantIds || !participantIds.length) {
+    return res.status(400).json({ message: 'Name and participants required' });
+  }
+
+  const encryption = generateChatKey();
+  const chat = await Chat.create({
+    chatId: uuidv4(),
+    name,
+    avatar,
+    participants: [
+      { user: userId, role: 'admin' },
+      ...participantIds.map(id => ({ user: id, role: 'member' }))
+    ],
+    isGroup: true,
+    createdBy: userId,
+    encryption,
+  });
+
+  await chat.populate('participants.user', 'name comradeId isOnline mood');
+
+  return res.status(201).json({ chat });
+}
+
+export async function saveAsMemory(req, res) {
+  const { chatId } = req.params;
+  const { messageId, tags, notes } = req.body;
+  const userId = req.user.id;
+
+  const chat = await Chat.findOne({ chatId, 'participants.user': userId });
+  if (!chat) return res.status(404).json({ message: 'Chat not found' });
+
+  const memory = await Memory.create({
+    chat: chat._id,
+    savedBy: userId,
+    message: messageId,
+    tags,
+    notes
+  });
+
+  return res.status(201).json({ memory });
+}
+
+export async function getMemories(req, res) {
+  const { chatId } = req.params;
+  const userId = req.user.id;
+
+  const chat = await Chat.findOne({ chatId, 'participants.user': userId });
+  if (!chat) return res.status(404).json({ message: 'Chat not found' });
+
+  const memories = await Memory.find({ chat: chat._id })
+    .populate({
+      path: 'message',
+      populate: { path: 'sender', select: 'name comradeId' }
+    })
+    .sort({ createdAt: -1 });
+
+  const result = memories.map(m => {
+    const doc = m.toObject();
+    if (doc.message && doc.message.type === 'text' && doc.message.encryptedContent) {
+      doc.message.content = decryptForChat(chat, doc.message.encryptedContent);
+    }
+    return doc;
+  });
+
+  return res.json({ memories: result });
+}
+
+export async function deleteMemory(req, res) {
+  const { memoryId } = req.params;
+  const userId = req.user.id;
+
+  const memory = await Memory.findById(memoryId).populate('chat');
+  if (!memory) return res.status(404).json({ message: 'Memory not found' });
+
+  const isParticipant = memory.chat.participants.some(p => String(p.user._id || p.user) === userId);
+  if (!isParticipant) return res.status(403).json({ message: 'Forbidden' });
+
+  await Memory.findByIdAndDelete(memoryId);
+  return res.json({ message: 'Memory removed' });
+}
+
+export async function convertToTask(req, res) {
+  const { chatId } = req.params;
+  const { messageId, title, description, assignedTo, dueDate } = req.body;
+  const userId = req.user.id;
+
+  const chat = await Chat.findOne({ chatId, 'participants.user': userId });
+  if (!chat) return res.status(404).json({ message: 'Chat not found' });
+
+  const task = await Task.create({
+    chat: chat._id,
+    createdFromMessage: messageId,
+    createdBy: userId,
+    assignedTo,
+    title,
+    description,
+    dueDate
+  });
+
+  const io = getIO();
+  if (io) {
+    io.to(`chat:${chatId}`).emit('chat:task_created', { chatId, task });
+  }
+
+  return res.status(201).json({ task });
+}
+
+export async function getTasks(req, res) {
+  const { chatId } = req.params;
+  const userId = req.user.id;
+
+  const chat = await Chat.findOne({ chatId, 'participants.user': userId });
+  if (!chat) return res.status(404).json({ message: 'Chat not found' });
+
+  const tasks = await Task.find({ chat: chat._id })
+    .populate('assignedTo', 'name comradeId')
+    .populate('chat')
+    .sort({ createdAt: -1 });
+
+  return res.json({ tasks });
+}
+
+export async function updateTaskStatus(req, res) {
+  const { taskId } = req.params;
+  const { status } = req.body;
+  const userId = req.user.id;
+
+  const task = await Task.findById(taskId).populate('chat');
+  if (!task) return res.status(404).json({ message: 'Task not found' });
+
+  const isParticipant = task.chat.participants.some(p => String(p.user._id || p.user) === userId);
+  if (!isParticipant) return res.status(403).json({ message: 'Forbidden' });
+
+  task.status = status;
+  await task.save();
+
+  const io = getIO();
+  if (io) {
+    io.to(`chat:${task.chat.chatId}`).emit('chat:task_updated', { taskId, status });
+  }
+
+  return res.json({ task });
+}
+
+export async function deleteTask(req, res) {
+  const { taskId } = req.params;
+  const userId = req.user.id;
+
+  const task = await Task.findById(taskId).populate('chat');
+  if (!task) return res.status(404).json({ message: 'Task not found' });
+
+  const isParticipant = task.chat.participants.some(p => String(p.user._id || p.user) === userId);
+  if (!isParticipant) return res.status(403).json({ message: 'Forbidden' });
+
+  await Task.findByIdAndDelete(taskId);
+
+  const io = getIO();
+  if (io) {
+    io.to(`chat:${task.chat.chatId}`).emit('chat:task_deleted', { taskId });
+  }
+
+  return res.json({ message: 'Task deleted' });
+}
+
+export async function voteInPoll(req, res) {
+  const { messageId } = req.params;
+  const { optionIndex } = req.body;
+  const userId = req.user.id;
+
+  const message = await Message.findById(messageId).populate('chat');
+  if (!message || message.type !== 'poll') return res.status(404).json({ message: 'Poll not found' });
+
+  const isParticipant = message.chat.participants.some(p => p.user.toString() === userId);
+  if (!isParticipant) return res.status(403).json({ message: 'Forbidden' });
+
+  // Remove previous vote if any
+  message.pollData.options.forEach(opt => {
+    opt.votes = opt.votes.filter(v => v.toString() !== userId);
+  });
+
+  // Add new vote
+  if (optionIndex !== null && message.pollData.options[optionIndex]) {
+    message.pollData.options[optionIndex].votes.push(userId);
+  }
+
+  await message.save();
+
+  const io = getIO();
+  if (io) {
+    io.to(`chat:${message.chat.chatId}`).emit('chat:message_updated', {
+      messageId: message._id,
+      pollData: message.pollData,
+    });
+  }
+
+  return res.json({ pollData: message.pollData });
+}
+
+export async function pinMessage(req, res) {
+  const { messageId } = req.params;
+  const userId = req.user.id;
+
+  const message = await Message.findById(messageId).populate('chat');
+  if (!message) return res.status(404).json({ message: 'Message not found' });
+
+  const chat = message.chat;
+  const userRole = chat.participants.find(p => p.user.toString() === userId)?.role;
+  if (!['admin', 'moderator'].includes(userRole)) {
+    return res.status(403).json({ message: 'Only admins/moderators can pin' });
+  }
+
+  if (!chat.pinnedMessages.includes(message._id)) {
+    chat.pinnedMessages.push(message._id);
+    await chat.save();
+
+    const io = getIO();
+    if (io) {
+      io.to(`chat:${chat.chatId}`).emit('chat:pinned_updated', { pinnedMessages: chat.pinnedMessages });
+    }
+  }
+
+  return res.json({ pinnedMessages: chat.pinnedMessages });
+}
+
+export async function unpinMessage(req, res) {
+  const { messageId } = req.params;
+  const userId = req.user.id;
+
+  const chat = await Chat.findOne({ pinnedMessages: messageId });
+  if (!chat) return res.status(404).json({ message: 'Chat not found' });
+
+  const userRole = chat.participants.find(p => p.user.toString() === userId)?.role;
+  if (!['admin', 'moderator'].includes(userRole)) {
+    return res.status(403).json({ message: 'Forbidden' });
+  }
+
+  chat.pinnedMessages = chat.pinnedMessages.filter(id => id.toString() !== messageId);
+  await chat.save();
+
+  const io = getIO();
+  if (io) {
+    io.to(`chat:${chat.chatId}`).emit('chat:pinned_updated', { pinnedMessages: chat.pinnedMessages });
+  }
+
+  return res.json({ pinnedMessages: chat.pinnedMessages });
+}
+
+export async function updateChatSettings(req, res) {
+  const { chatId } = req.params;
+  const { themeColor, backgroundImage, chatLockPin } = req.body;
+  const userId = req.user.id;
+
+  const chat = await Chat.findOne({ chatId, 'participants.user': userId });
+  if (!chat) return res.status(404).json({ message: 'Chat not found' });
+
+  if (themeColor) chat.settings.themeColor = themeColor;
+  if (backgroundImage) chat.settings.backgroundImage = backgroundImage;
+  if (chatLockPin) chat.settings.chatLockPin = chatLockPin; // In real app, hash this
+
+  await chat.save();
+
+  const io = getIO();
+  if (io) {
+    io.to(`chat:${chat.chatId}`).emit('chat:settings_updated', { settings: chat.settings });
+  }
+
+  return res.json({ settings: chat.settings });
+}
+
+export async function editMessage(req, res) {
+  const { messageId } = req.params;
+  const { text } = req.body;
+  const userId = req.user.id;
+
+  const message = await Message.findById(messageId).populate('chat');
+  if (!message) return res.status(404).json({ message: 'Message not found' });
+
+  if (message.sender.toString() !== userId) return res.status(403).json({ message: 'Forbidden' });
+
+  // Store history
+  message.editHistory.push({
+    content: message.encryptedContent,
+    editedAt: new Date(),
+  });
+
+  // Encrypt new text
+  const encrypted = encryptForChat(message.chat, text);
+  message.encryptedContent = encrypted;
+  await message.save();
+
+  const io = getIO();
+  if (io) {
+    io.to(`chat:${message.chat.chatId}`).emit('chat:message_updated', {
+      messageId: message._id,
+      content: text,
+      editHistory: message.editHistory,
+    });
+  }
+
+  return res.json({ message: 'Message updated' });
 }
