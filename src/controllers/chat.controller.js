@@ -60,7 +60,17 @@ export async function listChats(req, res) {
     .select('chatId participants lastMessageAt lastMessagePreview isGroup name avatar settings')
     .populate('participants.user', 'name comradeId isOnline lastSeenAt mood');
 
-  return res.json({ chats });
+  const chatsWithCounts = await Promise.all(chats.map(async (chat) => {
+    const unreadCount = await Message.countDocuments({
+      chat: chat._id,
+      sender: { $ne: userId },
+      'readBy.user': { $ne: userId },
+      isScheduled: { $ne: true }
+    });
+    return { ...chat.toObject(), unreadCount };
+  }));
+
+  return res.json({ chats: chatsWithCounts });
 }
 
 export async function getChat(req, res) {
@@ -78,12 +88,24 @@ export async function getChat(req, res) {
     return res.status(404).json({ message: 'Chat not found' });
   }
 
-  return res.json({ chat });
+  // Add counts for badges
+  const [memoryCount, pendingTaskCount] = await Promise.all([
+    Memory.countDocuments({ chat: chat._id }),
+    Task.countDocuments({ chat: chat._id, status: { $ne: 'done' } })
+  ]);
+
+  return res.json({ 
+    chat: { 
+      ...chat.toObject(), 
+      memoryCount, 
+      pendingTaskCount 
+    } 
+  });
 }
 
 export async function getMessages(req, res) {
   const { chatId } = req.params;
-  const { before, limit = 30 } = req.query;
+  const { before, limit = 30, aroundMessageId } = req.query;
   const userId = req.user.id;
 
   const chat = await Chat.findOne({ chatId, 'participants.user': userId });
@@ -91,7 +113,35 @@ export async function getMessages(req, res) {
     return res.status(404).json({ message: 'Chat not found' });
   }
 
-  const match = { 
+  let match = { chat: chat._id };
+
+  if (aroundMessageId) {
+    // Jump to context mode
+    const target = await Message.findById(aroundMessageId);
+    if (!target) return res.status(404).json({ message: 'Target message not found' });
+
+    // Fetch messages BEFORE the target (including target)
+    const beforeMsgs = await Message.find({
+      chat: chat._id,
+      createdAt: { $lte: target.createdAt },
+      $or: [{ isScheduled: { $ne: true } }, { sender: userId }]
+    }).sort({ createdAt: -1 }).limit(15);
+
+    // Fetch messages AFTER the target
+    const afterMsgs = await Message.find({
+      chat: chat._id,
+      createdAt: { $gt: target.createdAt },
+      $or: [{ isScheduled: { $ne: true } }, { sender: userId }]
+    }).sort({ createdAt: 1 }).limit(15);
+
+    const messages = [...afterMsgs, ...beforeMsgs].sort((a, b) => a.createdAt - b.createdAt);
+    
+    const result = transformMessages(messages, chat, userId);
+    return res.json({ messages: result, isContextLoaded: true });
+  }
+
+  // Normal pagination mode
+  match = { 
     chat: chat._id,
     $or: [
       { isScheduled: { $ne: true } },
@@ -108,97 +158,109 @@ export async function getMessages(req, res) {
     .populate('sender', 'name comradeId')
     .populate({ path: 'replyTo', populate: { path: 'sender', select: 'name comradeId' } });
 
-  const result = messages
-    .map((m) => {
-      let content = null;
-      if (m.encryptedContent && !m.isDeleted) {
+  const result = transformMessages(messages, chat, userId);
+  return res.json({ messages: result.reverse() });
+}
+
+function transformMessages(messages, chat, userId) {
+  return messages.map((m) => {
+    let content = null;
+    if (m.encryptedContent && !m.isDeleted) {
+      try {
+        const decrypted = decryptForChat(chat, m.encryptedContent);
+        content = decrypted;
+      } catch (e) {
+        content = null;
+      }
+    }
+
+    let replyPreview = null;
+    if (m.replyTo) {
+      // Ensure replyTo is an object with sender before trying to build preview
+      const replyData = m.replyTo;
+      let replyContent = null;
+      if (replyData.encryptedContent && !replyData.isDeleted) {
         try {
-          const decrypted = decryptForChat(chat, m.encryptedContent);
-          content = decrypted;
+          const decryptedReply = decryptForChat(chat, replyData.encryptedContent);
+          replyContent = decryptedReply;
         } catch (e) {
-          content = null;
+          replyContent = null;
         }
       }
 
-      let replyPreview = null;
-      if (m.replyTo) {
-        let replyContent = null;
-        if (m.replyTo.encryptedContent && !m.replyTo.isDeleted) {
-          try {
-            const decryptedReply = decryptForChat(chat, m.replyTo.encryptedContent);
-            replyContent = decryptedReply;
-          } catch (e) {
-            replyContent = null;
-          }
-        }
-
-        replyPreview = {
-          id: m.replyTo._id,
-          sender: m.replyTo.sender,
-          type: m.replyTo.type,
-          content: m.replyTo.type === 'text' ? replyContent : null,
-          mediaType: m.replyTo.mediaType,
-        };
-      }
-
-      return {
-        id: m._id,
-        chatId: chat.chatId,
-        sender: m.sender,
-        type: m.type,
-        content,
-        mediaUrl: m.mediaUrl,
-        mediaType: m.mediaType,
-        fileName: m.fileName,
-        fileSize: m.fileSize,
-        isSaved: m.isSaved,
-        expiresAt: m.expiresAt,
-        isDeleted: m.isDeleted,
-        reactions: m.reactions,
-        readBy: m.readBy,
-        createdAt: m.createdAt,
-        replyTo: replyPreview,
-        pollData: m.pollData,
-        gameData: m.gameData,
-        isScheduled: m.isScheduled,
-        scheduledFor: m.scheduledFor,
-        isSurprise: m.isSurprise,
-        unlockAt: m.unlockAt,
-        editHistory: m.editHistory,
+      replyPreview = {
+        id: replyData._id,
+        sender: replyData.sender,
+        type: replyData.type,
+        content: replyData.type === 'text' ? replyContent : null,
+        mediaType: replyData.mediaType,
       };
-    })
-    .reverse();
+    }
 
-  return res.json({ messages: result });
+    return {
+      id: m._id,
+      chatId: chat.chatId,
+      sender: m.sender,
+      type: m.type,
+      content,
+      mediaUrl: m.mediaUrl,
+      mediaType: m.mediaType,
+      fileName: m.fileName,
+      fileSize: m.fileSize,
+      isSaved: m.isSaved,
+      expiresAt: m.expiresAt,
+      isDeleted: m.isDeleted,
+      reactions: m.reactions,
+      readBy: m.readBy,
+      createdAt: m.createdAt,
+      replyTo: replyPreview,
+      pollData: m.pollData,
+      gameData: m.gameData,
+      isScheduled: m.isScheduled,
+      scheduledFor: m.scheduledFor,
+      isSurprise: m.isSurprise,
+      unlockAt: m.unlockAt,
+      editHistory: m.editHistory,
+    };
+  });
 }
 
 export async function deleteMessage(req, res) {
-  const { messageId } = req.params;
-  const userId = req.user.id;
+  try {
+    const { messageId } = req.params;
+    const userId = req.user.id;
 
-  const message = await Message.findById(messageId).populate('chat');
-  if (!message) return res.status(404).json({ message: 'Message not found' });
+    if (!messageId) return res.status(400).json({ message: 'Message ID required' });
 
-  const isSender = message.sender.toString() === userId;
-  if (!isSender) return res.status(403).json({ message: 'Only sender can delete their message' });
+    const message = await Message.findById(messageId).populate('chat');
+    if (!message) return res.status(404).json({ message: 'Message not found' });
 
-  message.isDeleted = true;
-  message.encryptedContent = encryptForChat(message.chat, 'This message was deleted');
-  message.mediaUrl = null;
-  message.pollData = null;
-  message.gameData = null;
-  await message.save();
+    const isSender = message.sender.toString() === userId;
+    if (!isSender) return res.status(403).json({ message: 'Only sender can delete their message' });
 
-  const io = getIO();
-  if (io) {
-    io.to(`chat:${message.chat.chatId}`).emit('chat:message_updated', {
-      messageId: message._id,
-      isDeleted: true,
-      content: message.content
-    });
+    message.isDeleted = true;
+    message.encryptedContent = ''; 
+    message.mediaUrl = null;
+    message.pollData = null;
+    message.gameData = null;
+    await message.save();
+
+    const io = getIO();
+    if (io) {
+      const chatID = message.chat?.chatId;
+      if (chatID) {
+        io.to(`chat:${chatID}`).emit('chat:message_updated', {
+          messageId: message._id,
+          isDeleted: true
+        });
+      }
+    }
+
+    return res.json({ message: 'Message deleted' });
+  } catch (err) {
+    console.error('Delete Message Error:', err);
+    return res.status(500).json({ message: 'Internal Server Error', error: err.message });
   }
-
-  return res.json({ message: 'Message deleted' });
 }
 
 export async function sendMessage(req, res) {
@@ -587,6 +649,10 @@ export async function deleteMemory(req, res) {
   const isParticipant = memory.chat.participants.some(p => String(p.user._id || p.user) === userId);
   if (!isParticipant) return res.status(403).json({ message: 'Forbidden' });
 
+  if (memory.savedBy.toString() !== userId) {
+    return res.status(403).json({ message: 'Only the creator can delete this memory' });
+  }
+
   await Memory.findByIdAndDelete(memoryId);
   return res.json({ message: 'Memory removed' });
 }
@@ -663,6 +729,10 @@ export async function deleteTask(req, res) {
 
   const isParticipant = task.chat.participants.some(p => String(p.user._id || p.user) === userId);
   if (!isParticipant) return res.status(403).json({ message: 'Forbidden' });
+
+  if (task.createdBy.toString() !== userId) {
+    return res.status(403).json({ message: 'Only the creator can delete this task' });
+  }
 
   await Task.findByIdAndDelete(taskId);
 
@@ -781,7 +851,8 @@ export async function updateChatSettings(req, res) {
 
 export async function editMessage(req, res) {
   const { messageId } = req.params;
-  const { text } = req.body;
+  const { text, content } = req.body;
+  const updateText = text || content;
   const userId = req.user.id;
 
   const message = await Message.findById(messageId).populate('chat');
@@ -796,7 +867,7 @@ export async function editMessage(req, res) {
   });
 
   // Encrypt new text
-  const encrypted = encryptForChat(message.chat, text);
+  const encrypted = encryptForChat(message.chat, updateText);
   message.encryptedContent = encrypted;
   await message.save();
 
@@ -804,7 +875,7 @@ export async function editMessage(req, res) {
   if (io) {
     io.to(`chat:${message.chat.chatId}`).emit('chat:message_updated', {
       messageId: message._id,
-      content: text,
+      content: updateText,
       editHistory: message.editHistory,
     });
   }

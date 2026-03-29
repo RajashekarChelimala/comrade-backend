@@ -49,7 +49,8 @@ export function encryptForChat(chat, plaintext) {
   const key = getChatKeyFromEncrypted(chat.encryption.encryptedChatKey);
   const iv = crypto.randomBytes(12);
   const cipher = crypto.createCipheriv(ALGO, key, iv);
-  const encrypted = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
+  const safeText = String(plaintext || '');
+  const encrypted = Buffer.concat([cipher.update(safeText, 'utf8'), cipher.final()]);
   const authTag = cipher.getAuthTag();
 
   const payload = Buffer.concat([iv, authTag, encrypted]).toString('base64');
